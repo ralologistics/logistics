@@ -1,386 +1,182 @@
 <?php
-/**
- * store.php (Job Booking - CREATE)
- * Uses mysqli + prepared statements + transaction
- *
- * ✅ Inserts in this order:
- *  1) job_addresses  (Sender)
- *  2) job_addresses  (Receiver)
- *  3) job_bookings
- *  4) job_tracking_notifications  (communication_type + contact_value + notification_type)
- *  5) job_additional_information  (insurance_type + dg_signatory)
- *  6) job_packages (multiple)
- *  7) job_additional_services (pivot, multiple)
- *  8) job_attachments (single file)
- */
-
 session_start();
-require "db.php"; // must provide $conn = new mysqli(...)
+require 'db.php';
+require 'functions.php';
 
-// if (!isset($_SESSION['user_id'])) {
-//   header("Location: login.php");
-//   exit;
-// }
+header('Content-Type: text/html; charset=utf-8');
 
-mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
-
-// helper
-function post($key, $default = null) {
-  return isset($_POST[$key]) && $_POST[$key] !== '' ? trim($_POST[$key]) : $default;
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header('Location: ' . URL . '/job-booking-form.php');
+    exit;
 }
 
-// Logged-in user
-// $created_by = (int)$_SESSION['user_id'];
+$customer_id = isset($_POST['customer_id']) ? (int)$_POST['customer_id'] : 0;
+$company_id = isset($_POST['company_id']) ? (int)$_POST['company_id'] : 0;
+$customer_reference = trim($_POST['customer_reference'] ?? '');
+$receiver_reference = trim($_POST['receiver_reference'] ?? '');
+$freight_ready_by = !empty($_POST['freight_ready_by']) ? $_POST['freight_ready_by'] : null;
+$insurance_type = $_POST['insurance_type'] ?? 'Owners Risk';
+$dg_signatory_id = !empty($_POST['dg_signatory_id']) ? (int)$_POST['dg_signatory_id'] : null;
+$action = $_POST['action'] ?? 'save';
 
-/* ===============================
-   1️⃣ COLLECT FORM DATA
-   =============================== */
-
-// Customer Details (your form currently has text fields)
-$customer_code  = post('customer_name_code');     // text
-$company_name        = post('company');                // text (or id if you change)
-$customer_reference  = post('customer_reference');
-$receiver_reference  = post('receiver_reference');
-$freight_ready_by    = post('freight_ready_by');       // datetime-local string
-
-// Sender (address)
-$sender_country        = post('sender_country');
-$sender_name           = post('sender_name');
-$sender_find_address   = post('sender_find_address');  // not stored in DB by default (optional)
-$sender_building       = post('sender_building');
-$sender_street_no      = post('sender_street_no');
-$sender_street         = post('sender_street');
-$sender_suburb         = post('sender_suburb');
-$sender_city_town      = post('sender_city_town');
-$sender_state          = post('sender_state');
-$sender_postcode       = post('sender_postcode');
-$sender_contact_person = post('sender_contact_person');
-$sender_mobile         = post('sender_mobile');
-$sender_phone          = post('sender_phone');
-$sender_email          = post('sender_email');
-$pickup_instruction    = post('pickup_instruction');
-
-// Receiver (address)
-$receiver_country        = post('receiver_country');
-$receiver_name           = post('receiver_name');
-$receiver_find_address   = post('receiver_find_address'); // optional
-$receiver_building       = post('receiver_building');
-$receiver_street_no      = post('receiver_street_no');
-$receiver_street         = post('receiver_street');
-$receiver_suburb         = post('receiver_suburb');
-$receiver_city_town      = post('receiver_city_town');
-$receiver_state          = post('receiver_state');
-$receiver_postcode       = post('receiver_postcode');
-$receiver_contact_person = post('receiver_contact_person');
-$receiver_mobile         = post('receiver_mobile');
-$receiver_phone          = post('receiver_phone');
-$receiver_email          = post('receiver_email');
-$delivery_instruction    = post('delivery_instruction');
-
-// Checkbox
-$signature_required = isset($_POST['signature_required']) ? 1 : 0;
-
-// Tracking Notification (as per your latest requirement)
-$tracking_communication_type = post('tracking_communication_type');  // dropdown Email/Phone
-$tracking_contact_value      = post('tracking_contact_value');       // email OR phone
-$tracking_notification_type  = post('tracking_notification_type');   // dropdown SMS/Email/Push
-
-// Additional Information
-$insurance_type = post('insurance_type'); // dropdown
-$dg_signatory   = post('dg_signatory');   // dropdown Yes/No
-
-// Additional services (multi) => MUST be IDs in option value
-$additional_services = $_POST['additional_services'] ?? []; // array
-
-// Packages (array)
-$packages = $_POST['packages'] ?? [];
-
-/* ===============================
-   2️⃣ FILE UPLOAD
-   =============================== */
-$attachment_path = null;
-$attachment_name = null;
-$attachment_mime = null;
-$attachment_size = null;
-
-if (!empty($_FILES['attachment']['name'])) {
-  $uploadDir = __DIR__ . "/uploads/job_attachments/";
-  if (!is_dir($uploadDir)) {
-    mkdir($uploadDir, 0777, true);
-  }
-
-  $attachment_name = basename($_FILES['attachment']['name']);
-  $safeName = time() . "_" . preg_replace('/[^a-zA-Z0-9._-]/', '_', $attachment_name);
-  $targetFile = $uploadDir . $safeName;
-
-  if (move_uploaded_file($_FILES['attachment']['tmp_name'], $targetFile)) {
-    $attachment_path = "uploads/job_attachments/" . $safeName;
-    $attachment_mime = $_FILES['attachment']['type'] ?? null;
-    $attachment_size = $_FILES['attachment']['size'] ?? null;
-  }
+// Validate required
+if (!$customer_id || !$company_id) {
+    $_SESSION['job_booking_error'] = 'Customer and Company are required.';
+    header('Location: ' . URL . '/job-booking-form.php');
+    exit;
 }
 
-/* ===============================
-   3️⃣ INSERT USING TRANSACTION
-   =============================== */
+// Generate unique booking_id
+$booking_id = 'JB-' . date('Ymd') . '-' . strtoupper(substr(uniqid(), -6));
 
+$conn->begin_transaction();
 try {
-  $conn->begin_transaction();
+    // 1. Insert job_bookings
+    $stmt = $conn->prepare("
+        INSERT INTO job_bookings (job_type, customer_id, company_id, customer_reference, receiver_reference, freight_ready_by, booking_id, status)
+        VALUES ('GENERAL', ?, ?, ?, ?, ?, ?, 'DRAFT')
+    ");
+    $stmt->bind_param('iissss', $customer_id, $company_id, $customer_reference, $receiver_reference, $freight_ready_by, $booking_id);
+    $stmt->execute();
+    $booking_pk = (int)$conn->insert_id;
+    $stmt->close();
+    if ($booking_pk <= 0) throw new Exception('Failed to create job booking.');
 
-  // 3.1 Insert Sender Address
-  $sqlAddr = "
-    INSERT INTO job_addresses
-    (country_code, name, building, street_no, street, suburb, city_town, state, postcode,
-     contact_person, mobile, phone, email)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-  ";
-  $stmtAddr = $conn->prepare($sqlAddr);
-  $stmtAddr->bind_param(
-    "sssssssssssss",
-    $sender_country,
-    $sender_name,
-    $sender_building,
-    $sender_street_no,
-    $sender_street,
-    $sender_suburb,
-    $sender_city_town,
-    $sender_state,
-    $sender_postcode,
-    $sender_contact_person,
-    $sender_mobile,
-    $sender_phone,
-    $sender_email
-  );
-  $stmtAddr->execute();
-  $sender_address_id = $conn->insert_id;
+    // 2. Sender address
+    $stmt_addr = $conn->prepare("
+        INSERT INTO addresses (country_id, name, building, street_no, street, suburb, find_address, city, state, postcode, contact_person, mobile, phone, email, pickup_instruction, signature_required, delivery_instruction)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+    ");
+    $country_id = (int)($_POST['sender_country_id'] ?? 0);
+    $name = trim($_POST['sender_name'] ?? '');
+    $building = trim($_POST['sender_building'] ?? '');
+    $street_no = trim($_POST['sender_street_no'] ?? '');
+    $street = trim($_POST['sender_street'] ?? '');
+    $suburb = trim($_POST['sender_suburb'] ?? '');
+    $find_address = trim($_POST['sender_find_address'] ?? '');
+    $city = trim($_POST['sender_city'] ?? '');
+    $state = trim($_POST['sender_state'] ?? '');
+    $postcode = trim($_POST['sender_postcode'] ?? '');
+    $contact_person = trim($_POST['sender_contact_person'] ?? '');
+    $mobile = trim($_POST['sender_mobile'] ?? '');
+    $phone = trim($_POST['sender_phone'] ?? '');
+    $email = trim($_POST['sender_email'] ?? '');
+    $pickup_instruction = trim($_POST['sender_pickup_instruction'] ?? '');
+    $stmt_addr->bind_param('issssssssssssss', $country_id, $name, $building, $street_no, $street, $suburb, $find_address, $city, $state, $postcode, $contact_person, $mobile, $phone, $email, $pickup_instruction);
+    $stmt_addr->execute();
+    $sender_address_id = (int)$conn->insert_id;
+    $stmt_addr->close();
 
-  // 3.2 Insert Receiver Address (reuse same prepared statement)
-  $stmtAddr->bind_param(
-    "sssssssssssss",
-    $receiver_country,
-    $receiver_name,
-    $receiver_building,
-    $receiver_street_no,
-    $receiver_street,
-    $receiver_suburb,
-    $receiver_city_town,
-    $receiver_state,
-    $receiver_postcode,
-    $receiver_contact_person,
-    $receiver_mobile,
-    $receiver_phone,
-    $receiver_email
-  );
-  $stmtAddr->execute();
-  $receiver_address_id = $conn->insert_id;
+    $stmt_ja = $conn->prepare("INSERT INTO job_addresses (booking_id, address_id, party_role, instructions, signature_required) VALUES (?, ?, 'SENDER', ?, 0)");
+    $stmt_ja->bind_param('iis', $booking_pk, $sender_address_id, $pickup_instruction);
+    $stmt_ja->execute();
+    $stmt_ja->close();
 
-  // 3.3 Insert Job Booking
-  /**
-   * ⚠️ IMPORTANT:
-   * Your earlier schema had customer_id/company_id.
-   * But your HTML is text-based (customer_name_code, company).
-   * So this insert assumes your job_bookings table includes:
-   *   customer_name_code (VARCHAR), company (VARCHAR)
-   *
-   * If your table uses customer_id/company_id instead,
-   * replace columns & bind types accordingly.
-   */
+    // 3. Receiver address
+    $country_id_r = (int)($_POST['receiver_country_id'] ?? 0);
+    $name_r = trim($_POST['receiver_name'] ?? '');
+    $building_r = trim($_POST['receiver_building'] ?? '');
+    $street_no_r = trim($_POST['receiver_street_no'] ?? '');
+    $street_r = trim($_POST['receiver_street'] ?? '');
+    $suburb_r = trim($_POST['receiver_suburb'] ?? '');
+    $find_address_r = trim($_POST['receiver_find_address'] ?? '');
+    $city_r = trim($_POST['receiver_city'] ?? '');
+    $state_r = trim($_POST['receiver_state'] ?? '');
+    $postcode_r = trim($_POST['receiver_postcode'] ?? '');
+    $contact_person_r = trim($_POST['receiver_contact_person'] ?? '');
+    $mobile_r = trim($_POST['receiver_mobile'] ?? '');
+    $phone_r = trim($_POST['receiver_phone'] ?? '');
+    $email_r = trim($_POST['receiver_email'] ?? '');
+    $delivery_instruction = trim($_POST['receiver_delivery_instruction'] ?? '');
+    $signature_required = isset($_POST['receiver_signature_required']) ? 1 : 0;
 
+    $stmt_addr2 = $conn->prepare("
+        INSERT INTO addresses (country_id, name, building, street_no, street, suburb, find_address, city, state, postcode, contact_person, mobile, phone, email, pickup_instruction, signature_required, delivery_instruction)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+    ");
+    $stmt_addr2->bind_param('isssssssssssssis', $country_id_r, $name_r, $building_r, $street_no_r, $street_r, $suburb_r, $find_address_r, $city_r, $state_r, $postcode_r, $contact_person_r, $mobile_r, $phone_r, $email_r, $signature_required, $delivery_instruction);
+    $stmt_addr2->execute();
+    $receiver_address_id = (int)$conn->insert_id;
+    $stmt_addr2->close();
 
+    $stmt_ja2 = $conn->prepare("INSERT INTO job_addresses (booking_id, address_id, party_role, instructions, signature_required) VALUES (?, ?, 'RECEIVER', ?, ?)");
+    $stmt_ja2->bind_param('iisi', $booking_pk, $receiver_address_id, $delivery_instruction, $signature_required);
+    $stmt_ja2->execute();
+    $stmt_ja2->close();
 
-// Check if customer exists
-$checkCustomerSql = "SELECT id FROM customers WHERE code = ?";
-$stmt = mysqli_prepare($conn, $checkCustomerSql);
-mysqli_stmt_bind_param($stmt, "s", $customer_code);
-mysqli_stmt_execute($stmt);
-mysqli_stmt_bind_result($stmt, $customer_id);
-
-if (mysqli_stmt_fetch($stmt)) {
-    // Customer exists, $customer_id already available
-    mysqli_stmt_close($stmt);
-} else {
-    // Customer does not exist, insert new
-    mysqli_stmt_close($stmt);
-
-    $insertCustomer = "INSERT INTO customers (name, code) VALUES (?, ?)";
-    $stmt = mysqli_prepare($conn, $insertCustomer);
-    mysqli_stmt_bind_param($stmt, "ss", $customer_code, $customer_code);
-    mysqli_stmt_execute($stmt);
-
-    // Get newly inserted customer ID
-    $customer_id = mysqli_insert_id($conn);
-    mysqli_stmt_close($stmt);
-}
-
-// Check if company already exists
-$checkSql = "SELECT id FROM companies WHERE name = ?";
-$stmt = mysqli_prepare($conn, $checkSql);
-mysqli_stmt_bind_param($stmt, "s", $company_name);
-mysqli_stmt_execute($stmt);
-mysqli_stmt_bind_result($stmt, $company_id);
-
-if (mysqli_stmt_fetch($stmt)) {
-    // Company exists, $company_id already available
-    mysqli_stmt_close($stmt);
-} else {
-    // Company does not exist, insert new
-    mysqli_stmt_close($stmt);
-
-    $insertCompany = "INSERT INTO companies (name) VALUES (?)";
-    $stmt = mysqli_prepare($conn, $insertCompany);
-    mysqli_stmt_bind_param($stmt, "s", $company_name);
-    mysqli_stmt_execute($stmt);
-
-    // Get newly inserted company ID
-    $company_id = mysqli_insert_id($conn);
-    mysqli_stmt_close($stmt);
-}
-
-
-
- $booking_id = 'JB-' . uniqid();
-  $sqlJob = "
-    INSERT INTO job_bookings
-    ( customer_id, company_id, customer_reference, receiver_reference, freight_ready_by,
-     sender_address_id, receiver_address_id, pickup_instruction, delivery_instruction, signature_required, status, booking_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-  ";
-  $status = "draft";
-  $stmtJob = $conn->prepare($sqlJob);
-  $stmtJob->bind_param(
-    "iisssiiisiss",
-    $customer_id,
-    $company_id,
-    $customer_reference,
-    $receiver_reference,
-    $freight_ready_by,
-    $sender_address_id,
-    $receiver_address_id,
-    $pickup_instruction,
-    $delivery_instruction,
-    $signature_required,
-    $status,
-    $booking_id
-  );
-  $stmtJob->execute();
-  $job_id = $conn->insert_id;
-
-/* 
-  $sqlTrack = "
-    INSERT INTO job_tracking_notifications
-    (job_booking_id, communication_type, contact_value, notification_type, enabled)
-    VALUES (?,?,?,?,?)
-  ";
-  $enabled = 1;
-  $stmtTrack = $conn->prepare($sqlTrack);
-  $stmtTrack->bind_param(
-    "isssi",
-    $job_id,
-    $tracking_communication_type,
-    $tracking_contact_value,
-    $tracking_notification_type,
-    $enabled
-  );
-  $stmtTrack->execute();
-
-
-  $sqlAddInfo = "
-    INSERT INTO job_additional_information
-    (job_booking_id, insurance_type, dg_signatory)
-    VALUES (?,?,?)
-  ";
-  $stmtAdd = $conn->prepare($sqlAddInfo);
-  $stmtAdd->bind_param("iss", $job_id, $insurance_type, $dg_signatory);
-  $stmtAdd->execute();
-
-
-  if (is_array($packages) && count($packages) > 0) {
-    $sqlPkg = "
-      INSERT INTO job_packages
-      (job_booking_id, package_name, units, weight_kg, length_cm, width_cm, height_cm,
-       cubic_m3, package_type_id, dg_type_id, remarks)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    ";
-    $stmtPkg = $conn->prepare($sqlPkg);
-
-    foreach ($packages as $p) {
-      $package_name   = isset($p['package_name']) ? trim($p['package_name']) : null;
-      $units          = isset($p['units']) ? (int)$p['units'] : 0;
-      $weight_kg_pkg  = isset($p['weight_kg']) ? (float)$p['weight_kg'] : 0;
-
-      $length_cm      = $p['length_cm'] ?? null;
-      $width_cm       = $p['width_cm'] ?? null;
-      $height_cm      = $p['height_cm'] ?? null;
-      $cubic_m3       = $p['cubic_m3'] ?? null;
-
-      $package_type_id = isset($p['package_type']) ? (int)$p['package_type'] : 0;
-      $dg_type_id      = isset($p['dg_type']) && $p['dg_type'] !== "" ? (int)$p['dg_type'] : null;
-
-      $remarks        = isset($p['remarks']) ? trim($p['remarks']) : null;
-
-
-      if ($package_name === null && $units === 0 && $weight_kg_pkg == 0) {
-        continue;
-      }
-
-
-      $stmtPkg->bind_param(
-        "isidddddiiis",
-        $job_id,
-        $package_name,
-        $units,
-        $weight_kg_pkg,
-        $length_cm,
-        $width_cm,
-        $height_cm,
-        $cubic_m3,
-        $package_type_id,
-        $dg_type_id,
-        $remarks
-      );
-      $stmtPkg->execute();
+    // 4. Job packages
+    if (!empty($_POST['packages']) && is_array($_POST['packages'])) {
+        $stmt_pkg = $conn->prepare("INSERT INTO job_packages (booking_id, units, weight_kg, length_cm, width_cm, height_cm, cubic_m3, package_type_id, dg_type_id, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        foreach ($_POST['packages'] as $p) {
+            $units = (int)($p['units'] ?? 0);
+            $weight_kg = isset($p['weight_kg']) ? (float)$p['weight_kg'] : null;
+            $length_cm = !empty($p['length_cm']) ? (float)$p['length_cm'] : null;
+            $width_cm = !empty($p['width_cm']) ? (float)$p['width_cm'] : null;
+            $height_cm = !empty($p['height_cm']) ? (float)$p['height_cm'] : null;
+            $cubic_m3 = isset($p['cubic_m3']) ? (float)$p['cubic_m3'] : null;
+            $package_type_id = !empty($p['package_type_id']) ? (int)$p['package_type_id'] : null;
+            $dg_type_id = !empty($p['dg_type_id']) ? (int)$p['dg_type_id'] : null;
+            $remarks = trim($p['remarks'] ?? '');
+            if ($units > 0 && $weight_kg !== null) {
+                $stmt_pkg->bind_param('iidddddiis', $booking_pk, $units, $weight_kg, $length_cm, $width_cm, $height_cm, $cubic_m3, $package_type_id, $dg_type_id, $remarks);
+                $stmt_pkg->execute();
+            }
+        }
+        $stmt_pkg->close();
     }
-  }
 
-
-  if (is_array($additional_services) && count($additional_services) > 0) {
-    $sqlSvc = "INSERT INTO job_additional_services (job_booking_id, service_id) VALUES (?,?)";
-    $stmtSvc = $conn->prepare($sqlSvc);
-
-    foreach ($additional_services as $serviceId) {
-      if ($serviceId === "" || $serviceId === null) continue;
-      $serviceId = (int)$serviceId;
-      $stmtSvc->bind_param("ii", $job_id, $serviceId);
-      $stmtSvc->execute();
+    // 5. Job tracking notifications
+    if (!empty($_POST['notifications']) && is_array($_POST['notifications'])) {
+        $stmt_not = $conn->prepare("INSERT INTO job_tracking_notifications (job_id, notification_type_id, communication_type, contact, message, is_sent) VALUES (?, ?, ?, ?, '', 0)");
+        foreach ($_POST['notifications'] as $n) {
+            $comm = trim($n['communication_type'] ?? '');
+            if (!in_array($comm, ['EMAIL', 'PHONE', 'SMS', 'WHATSAPP', 'PUSH'], true)) continue;
+            $contact = trim($n['contact'] ?? '');
+            $notif_type_id = !empty($n['notification_type_id']) ? (int)$n['notification_type_id'] : null;
+            $stmt_not->bind_param('iiss', $booking_pk, $notif_type_id, $comm, $contact);
+            $stmt_not->execute();
+        }
+        $stmt_not->close();
     }
-  }
 
+    // 6. Job additional information
+    $allowed_insurance = ['Owners Risk', 'Carriers Risk', 'All Risk', 'Total Loss Only', 'Third Party', 'Limited Carrier Liability'];
+    if (!in_array($insurance_type, $allowed_insurance)) $insurance_type = 'Owners Risk';
+    $stmt_ai = $conn->prepare("INSERT INTO job_additional_information (booking_id, insurance_type, dg_signatory_id, customer_reference_2, receiver_reference_2) VALUES (?, ?, ?, ?, ?)");
+    $stmt_ai->bind_param('isiss', $booking_pk, $insurance_type, $dg_signatory_id, $customer_reference, $receiver_reference);
+    $stmt_ai->execute();
+    $stmt_ai->close();
 
-  if ($attachment_path !== null) {
-    $sqlAtt = "
-      INSERT INTO job_attachments
-      (job_booking_id, file_name, file_path, mime_type, file_size_bytes)
-      VALUES (?,?,?,?,?)
-    ";
-    $stmtAtt = $conn->prepare($sqlAtt);
-    $stmtAtt->bind_param(
-      "isssi",
-      $job_id,
-      $attachment_name,
-      $attachment_path,
-      $attachment_mime,
-      $attachment_size
-    );
-    $stmtAtt->execute();
-  }
+    // 7. File attachments
+    $upload_dir = __DIR__ . '/uploads/job_attachments/';
+    if (!is_dir($upload_dir)) @mkdir($upload_dir, 0755, true);
+    if (!empty($_FILES['attachments']['name'][0])) {
+        $stmt_att = $conn->prepare("INSERT INTO job_attachments (booking_id, file_path) VALUES (?, ?)");
+        foreach ($_FILES['attachments']['name'] as $i => $fname) {
+            if ($_FILES['attachments']['error'][$i] !== UPLOAD_ERR_OK) continue;
+            $ext = pathinfo($fname, PATHINFO_EXTENSION);
+            $saved = $upload_dir . $booking_pk . '_' . time() . '_' . $i . '.' . $ext;
+            if (move_uploaded_file($_FILES['attachments']['tmp_name'][$i], $saved)) {
+                $rel = 'uploads/job_attachments/' . basename($saved);
+                $stmt_att->bind_param('is', $booking_pk, $rel);
+                $stmt_att->execute();
+            }
+        }
+        $stmt_att->close();
+    }
 
-*/
-  $conn->commit();
-
-  header("Location: job-queue.php?success=1");
-  exit;
-
-} catch (Throwable $e) {
-  $conn->rollback();
-  die("Store failed: " . $e->getMessage());
+    $conn->commit();
+    unset($_SESSION['job_booking_error']);
+    $_SESSION['job_booking_success'] = 'Job booking saved. Booking ID: ' . $booking_id;
+    if ($action === 'save_print') {
+        header('Location: ' . URL . '/job-booking-print.php?id=' . $booking_pk);
+    } else {
+        header('Location: ' . URL . '/job-booking-form.php');
+    }
+    exit;
+} catch (Exception $e) {
+    $conn->rollback();
+    $_SESSION['job_booking_error'] = $e->getMessage();
+    header('Location: ' . URL . '/job-booking-form.php');
+    exit;
 }

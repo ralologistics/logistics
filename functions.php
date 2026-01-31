@@ -4,4 +4,6 @@ $env = "staging"; /* staging or live */
 
 $link = ($env == "staging") ? "http://localhost/ralo" : "";
 
-define('URL', $link);
+if (!defined('URL')) {
+    define('URL', $link);
+}

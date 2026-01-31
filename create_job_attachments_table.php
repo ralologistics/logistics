@@ -6,8 +6,8 @@ $conn->query("DROP TABLE IF EXISTS job_attachments");
 
 // Create the table
 $sql = "CREATE TABLE job_attachments (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    booking_id BIGINT UNSIGNED NOT NULL,
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    booking_id INT UNSIGNED NOT NULL,
     file_path VARCHAR(255),
     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (booking_id) REFERENCES job_bookings(id) ON DELETE CASCADE

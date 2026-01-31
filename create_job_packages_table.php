@@ -7,7 +7,7 @@ $conn->query("DROP TABLE IF EXISTS job_packages");
 // Create the table
 $sql = "CREATE TABLE job_packages (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    booking_id BIGINT UNSIGNED NOT NULL,
+    booking_id INT UNSIGNED NOT NULL,
     units INT,
     weight_kg DECIMAL(10,2),
     length_cm DECIMAL(10,2),

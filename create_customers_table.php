@@ -2,7 +2,7 @@
 require 'db.php';
 
 $sql = "CREATE TABLE IF NOT EXISTS `customers` (
-  `id` INT AUTO_INCREMENT PRIMARY KEY,
+ id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   `name` VARCHAR(255) NOT NULL,
   `code` VARCHAR(50),
   `email` VARCHAR(100),

@@ -6,7 +6,7 @@ $conn->query("DROP TABLE IF EXISTS notification_types");
 
 // Create the table
 $sql = "CREATE TABLE notification_types (
-    id INT AUTO_INCREMENT PRIMARY KEY,
+     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     description VARCHAR(255),
     is_active TINYINT(1) DEFAULT 1

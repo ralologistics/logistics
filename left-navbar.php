@@ -108,9 +108,15 @@ include('functions.php');
           </a>
         </li>
         <li class="nav-item">
-          <a href="<?php echo URL; ?>/job-booking.php" class="nav-link">
+          <a href="<?php echo URL; ?>/job-booking-form.php" class="nav-link">
             <i class="nav-icon fas fa-edit"></i>
             <p>Job Booking</p>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="<?php echo URL; ?>/job-booking-list.php" class="nav-link">
+            <i class="nav-icon fas fa-list"></i>
+            <p>Job Bookings List</p>
           </a>
         </li>
         <li class="nav-item">

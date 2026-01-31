@@ -7,7 +7,7 @@ $conn->query("DROP TABLE IF EXISTS job_additional_information");
 // Create the table
 $sql = "CREATE TABLE job_additional_information (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    booking_id BIGINT UNSIGNED NOT NULL,
+   booking_id INT UNSIGNED NOT NULL,
     insurance_type ENUM(
         'Owners Risk', 
         'Carriers Risk', 
